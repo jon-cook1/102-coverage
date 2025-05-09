@@ -2,72 +2,52 @@
 # ------------------------------------------------------------------
 # run_tests.sh  [optional:<path-to-lab-directory>]
 #
-# • If called with no argument, it reads the lab path stored in
-#   .lab_path (written by setup_tests.sh).
-# • Verifies no new Java source folders appeared since the last
-#   setup; aborts if there are.
-# • Runs all JUnit 5 tests with JaCoCo coverage.
-# • Opens the coverage report in the default browser.
+# • With no argument it uses the lab recorded in .lab_path
+#   (written by setup_tests.sh).
+# • Always re‑runs setup_tests.sh first, so any brand‑new *.java
+#   files are automatically added to pom.xml before the tests run.
+# • Compiles, runs JUnit 5 tests, collects JaCoCo coverage, then
+#   opens the refreshed HTML report.
+#
+# Uses only POSIX / BSD‑compatible tools (no mapfile, no grep -P),
+# so it works out‑of‑the‑box on macOS’ default Bash 3.2.
 # ------------------------------------------------------------------
 
 set -euo pipefail
 
-HARNESS_DIR="$(pwd)"
-LAB_PATH_FILE="$HARNESS_DIR/.lab_path"
+# Ensure we run from the harness directory (folder that has pom.xml)
+HARNESS_DIR="$(cd "$(dirname "$0")" && pwd)"
+cd "$HARNESS_DIR"
 
-# ---------- 0. determine LAB_DIR ----------
-if [[ $# -gt 0 ]]; then
-  LAB_DIR="$(realpath "$1")"
+LAB_PATH_FILE=".lab_path"
+
+# ---------- 0. determine LAB_DIR ---------------------------------
+if [ $# -gt 0 ]; then
+  LAB_DIR="$(cd "$1" && pwd)"
 else
-  if [[ -f "$LAB_PATH_FILE" ]]; then
+  if [ -f "$LAB_PATH_FILE" ]; then
     LAB_DIR="$(cat "$LAB_PATH_FILE")"
   else
-    echo "No lab configured yet. Run setup_tests.sh <lab-dir> first."
+    echo "No lab configured yet. Run  ./setup_tests.sh <lab-dir>  first." >&2
     exit 1
   fi
 fi
 
-[[ -d "$LAB_DIR" ]] || { echo "Lab directory not found: $LAB_DIR"; exit 1; }
-
-echo "Running tests for lab: $LAB_DIR"
-echo
-
-# ---------- 1. tracked source folders from pom.xml ----------
-mapfile -t TRACKED < <(
-  grep -oP '(?<=<source>).*?(?=</source>)' pom.xml | sort -u
-)
-
-# ---------- 2. actual source folders on disk ----------
-mapfile -t ACTUAL < <(
-  find "$LAB_DIR" -type f -name '*.java' -printf '%h\n' | sort -u
-)
-
-# ---------- 3. check for untracked folders ----------
-declare -a MISSING=()
-for dir in "${ACTUAL[@]}"; do
-  if ! printf '%s\n' "${TRACKED[@]}" | grep -qx "$dir"; then
-    MISSING+=("$dir")
-  fi
-done
-
-if [[ ${#MISSING[@]} -gt 0 ]]; then
-  echo "❗  New Java source folders detected that are NOT tracked:"
-  for d in "${MISSING[@]}"; do echo "    $d"; done
-  echo
-  echo "Run  ./setup_tests.sh \"$LAB_DIR\"  to refresh, then retry."
+if [ ! -d "$LAB_DIR" ]; then
+  echo "Lab directory not found: $LAB_DIR" >&2
   exit 1
 fi
-echo "[✓] Source folders up‑to‑date."
+
+echo "▶ Refreshing and running tests for lab: $LAB_DIR"
 echo
 
-# ---------- 4. run tests + coverage ----------
-./mvnw -q clean test
-echo "[✓] Tests completed"
-echo
+# ---------- 1. refresh harness (adds new folders, runs tests) ----
+./setup_tests.sh "$LAB_DIR"
 
+# setup_tests.sh already compiled & executed tests and generated coverage.
+# ---------- 2. open coverage report ------------------------------
 REPORT="$HARNESS_DIR/target/site/jacoco/index.html"
 
-# ---------- 5. open report ----------
 if command -v xdg-open >/dev/null 2>&1; then
   xdg-open "$REPORT" >/dev/null 2>&1 &
 elif command -v open >/dev/null 2>&1; then
@@ -77,4 +57,5 @@ elif command -v start >/dev/null 2>&1; then
 else
   echo "Coverage report: $REPORT"
 fi
-echo "Coverage report opened."
+
+echo "📊  Coverage report opened."

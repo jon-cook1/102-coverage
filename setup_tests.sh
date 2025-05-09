@@ -4,10 +4,15 @@
 #
 # • If called with no argument, it reads the lab path stored in
 #   .lab_path (written by setup_tests.sh).
-# • Verifies no new Java source folders appeared since the last
-#   setup; aborts if there are.
-# • Runs all JUnit 5 tests with JaCoCo coverage.
+# • Automatically checks whether new Java source folders have been
+#   added since the last setup.  If any are missing from pom.xml,
+#   it refreshes you:   ./setup_tests.sh <lab-dir>
+#   and exits with instructions.
+# • Runs all JUnit 5 tests with JaCoCo coverage.
 # • Opens the coverage report in the default browser.
+#
+# **BSD / macOS‑friendly**: uses POSIX tools only (no mapfile, no
+# grep ‑P), so it works with the default Bash 3.2 and BSD grep.
 # ------------------------------------------------------------------
 
 set -euo pipefail
@@ -16,10 +21,10 @@ HARNESS_DIR="$(pwd)"
 LAB_PATH_FILE="$HARNESS_DIR/.lab_path"
 
 # ---------- 0. determine LAB_DIR ----------
-if [[ $# -gt 0 ]]; then
-  LAB_DIR="$(realpath "$1")"
+if [ $# -gt 0 ]; then
+  LAB_DIR="$(cd "$1" && pwd)"
 else
-  if [[ -f "$LAB_PATH_FILE" ]]; then
+  if [ -f "$LAB_PATH_FILE" ]; then
     LAB_DIR="$(cat "$LAB_PATH_FILE")"
   else
     echo "No lab configured yet. Run setup_tests.sh <lab-dir> first."
@@ -27,36 +32,36 @@ else
   fi
 fi
 
-[[ -d "$LAB_DIR" ]] || { echo "Lab directory not found: $LAB_DIR"; exit 1; }
+if [ ! -d "$LAB_DIR" ]; then
+  echo "Lab directory not found: $LAB_DIR"
+  exit 1
+fi
 
-echo "Running tests for lab: $LAB_DIR"
+echo "▶ Running tests for lab: $LAB_DIR"
 echo
 
 # ---------- 1. tracked source folders from pom.xml ----------
-mapfile -t TRACKED < <(
-  grep -oP '(?<=<source>).*?(?=</source>)' pom.xml | sort -u
-)
+TRACKED=$(sed -n 's/.*<source>\(.*\)<\/source>.*/\1/p' pom.xml | sort -u)
 
 # ---------- 2. actual source folders on disk ----------
-mapfile -t ACTUAL < <(
-  find "$LAB_DIR" -type f -name '*.java' -printf '%h\n' | sort -u
-)
+ACTUAL=$(find "$LAB_DIR" -type f -name '*.java' -exec dirname {} \; | sort -u)
 
 # ---------- 3. check for untracked folders ----------
-declare -a MISSING=()
-for dir in "${ACTUAL[@]}"; do
-  if ! printf '%s\n' "${TRACKED[@]}" | grep -qx "$dir"; then
-    MISSING+=("$dir")
-  fi
+MISSING=""
+for dir in $ACTUAL; do
+  echo "$TRACKED" | grep -qx "$dir" || MISSING="$MISSING $dir"
 done
 
-if [[ ${#MISSING[@]} -gt 0 ]]; then
+if [ -n "$MISSING" ]; then
   echo "❗  New Java source folders detected that are NOT tracked:"
-  for d in "${MISSING[@]}"; do echo "    $d"; done
+  for d in $MISSING; do
+    echo "    $d"
+  done
   echo
-  echo "Run  ./setup_tests.sh \"$LAB_DIR\"  to refresh, then retry."
+  echo "Run  ./setup_tests.sh \"$LAB_DIR\"  to refresh the source list, then retry."
   exit 1
 fi
+
 echo "[✓] Source folders up‑to‑date."
 echo
 
@@ -77,4 +82,4 @@ elif command -v start >/dev/null 2>&1; then
 else
   echo "Coverage report: $REPORT"
 fi
-echo "Coverage report opened."
+echo "📊  Coverage report opened."
