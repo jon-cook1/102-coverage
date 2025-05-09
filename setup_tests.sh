@@ -1,85 +1,156 @@
 #!/usr/bin/env bash
 # ------------------------------------------------------------------
-# run_tests.sh  [optional:<path-to-lab-directory>]
+# setup_tests.sh  <path-to-lab-directory>
 #
-# • If called with no argument, it reads the lab path stored in
-#   .lab_path (written by setup_tests.sh).
-# • Automatically checks whether new Java source folders have been
-#   added since the last setup.  If any are missing from pom.xml,
-#   it refreshes you:   ./setup_tests.sh <lab-dir>
-#   and exits with instructions.
-# • Runs all JUnit 5 tests with JaCoCo coverage.
-# • Opens the coverage report in the default browser.
-#
-# **BSD / macOS‑friendly**: uses POSIX tools only (no mapfile, no
-# grep ‑P), so it works with the default Bash 3.2 and BSD grep.
+# • Creates or refreshes a Maven test harness (JUnit 5 + JaCoCo)
+#   that compiles everything in the specified lab directory.
+# • Works on default macOS / BSD tools (no Bash‑4 mapfile, no grep -P).
+# • Safe to rerun: detects lab changes, rewrites pom.xml as needed.
 # ------------------------------------------------------------------
 
 set -euo pipefail
 
-HARNESS_DIR="$(pwd)"
-LAB_PATH_FILE="$HARNESS_DIR/.lab_path"
-
-# ---------- 0. determine LAB_DIR ----------
-if [ $# -gt 0 ]; then
-  LAB_DIR="$(cd "$1" && pwd)"
-else
-  if [ -f "$LAB_PATH_FILE" ]; then
-    LAB_DIR="$(cat "$LAB_PATH_FILE")"
-  else
-    echo "No lab configured yet. Run setup_tests.sh <lab-dir> first."
-    exit 1
-  fi
-fi
-
-if [ ! -d "$LAB_DIR" ]; then
-  echo "Lab directory not found: $LAB_DIR"
+# ---------- 0. validate input -------------------------------------
+if [ $# -lt 1 ]; then
+  echo "Usage: $0 <path-to-lab-directory>" >&2
   exit 1
 fi
 
-echo "▶ Running tests for lab: $LAB_DIR"
-echo
+LAB_DIR="$(cd "$1" && pwd)"
+if [ ! -d "$LAB_DIR" ]; then
+  echo "Lab directory not found: $LAB_DIR" >&2
+  exit 1
+fi
 
-# ---------- 1. tracked source folders from pom.xml ----------
-TRACKED=$(sed -n 's/.*<source>\(.*\)<\/source>.*/\1/p' pom.xml | sort -u)
+HARNESS_DIR="$(cd "$(dirname "$0")" && pwd)"
+cd "$HARNESS_DIR"
 
-# ---------- 2. actual source folders on disk ----------
-ACTUAL=$(find "$LAB_DIR" -type f -name '*.java' -exec dirname {} \; | sort -u)
+LAB_PATH_FILE=".lab_path"
 
-# ---------- 3. check for untracked folders ----------
-MISSING=""
-for dir in $ACTUAL; do
-  echo "$TRACKED" | grep -qx "$dir" || MISSING="$MISSING $dir"
+# ---------- 1. detect lab switch ----------------------------------
+if [ -f "$LAB_PATH_FILE" ]; then
+  PREV_LAB="$(cat "$LAB_PATH_FILE")"
+else
+  PREV_LAB=""
+fi
+
+if [ "$PREV_LAB" != "$LAB_DIR" ]; then
+  echo "↻  Setting up harness for NEW lab: $LAB_DIR"
+  # remove old build artefacts; keep tests
+  rm -rf target pom.xml
+fi
+echo "$LAB_DIR" > "$LAB_PATH_FILE"
+
+# ---------- 2. ensure basic skeleton ------------------------------
+mkdir -p src/test/java
+
+# include Maven wrapper if repo didn't already ship it
+if [ ! -x mvnw ]; then
+  echo "Downloading Maven wrapper…"
+  WRAPPER_URL="https://repo.maven.apache.org/maven2/org/apache/maven/wrapper/maven-wrapper/3.2.0/maven-wrapper-3.2.0.zip"
+  curl -fsSL "$WRAPPER_URL" -o wrapper.zip
+  unzip -q wrapper.zip
+  rm wrapper.zip
+  chmod +x mvnw
+fi
+
+# ---------- 3. list all source folders inside the lab -------------
+SRC_DIRS=$(find "$LAB_DIR" -type f -name '*.java' -exec dirname {} \; | sort -u)
+if [ -z "$SRC_DIRS" ]; then
+  echo "No .java files found in $LAB_DIR" >&2
+  exit 1
+fi
+echo "[✓] Found $(printf '%s\n' $SRC_DIRS | wc -l) Java source folders"
+
+# build XML <sources> block
+SRC_XML=""
+for d in $SRC_DIRS; do
+  SRC_XML="$SRC_XML                <source>$d</source>\n"
 done
 
-if [ -n "$MISSING" ]; then
-  echo "❗  New Java source folders detected that are NOT tracked:"
-  for d in $MISSING; do
-    echo "    $d"
-  done
-  echo
-  echo "Run  ./setup_tests.sh \"$LAB_DIR\"  to refresh the source list, then retry."
-  exit 1
+# ---------- 4. (re)generate pom.xml -------------------------------
+cat > pom.xml <<EOF
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>edu.cosc102</groupId>
+  <artifactId>lab-tests</artifactId>
+  <version>1.0.0</version>
+
+  <properties>
+    <maven.compiler.source>17</maven.compiler.source>
+    <maven.compiler.target>17</maven.compiler.target>
+  </properties>
+
+  <build>
+    <plugins>
+
+      <!-- import external lab source folders -->
+      <plugin>
+        <groupId>org.codehaus.mojo</groupId>
+        <artifactId>build-helper-maven-plugin</artifactId>
+        <version>3.5.0</version>
+        <executions>
+          <execution>
+            <id>add-src</id><phase>generate-sources</phase>
+            <goals><goal>add-source</goal></goals>
+            <configuration>
+              <sources>
+$(printf "%b" "$SRC_XML")              </sources>
+            </configuration>
+          </execution>
+        </executions>
+      </plugin>
+
+      <!-- run JUnit 5 -->
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-surefire-plugin</artifactId>
+        <version>3.2.5</version>
+        <configuration><useModulePath>false</useModulePath></configuration>
+      </plugin>
+
+      <!-- collect coverage -->
+      <plugin>
+        <groupId>org.jacoco</groupId>
+        <artifactId>jacoco-maven-plugin</artifactId>
+        <version>0.8.13</version>
+        <executions>
+          <execution><goals><goal>prepare-agent</goal></goals></execution>
+          <execution>
+            <id>report</id><phase>test</phase><goals><goal>report</goal></goals>
+          </execution>
+        </executions>
+      </plugin>
+
+    </plugins>
+  </build>
+
+  <dependencies>
+    <dependency>
+      <groupId>org.junit.jupiter</groupId>
+      <artifactId>junit-jupiter</artifactId>
+      <version>5.12.2</version>
+      <scope>test</scope>
+    </dependency>
+  </dependencies>
+</project>
+EOF
+echo "[✓] pom.xml written"
+
+# ---------- 5. add placeholder test once --------------------------
+if [ ! -f src/test/java/SampleTest.java ]; then
+  cat > src/test/java/SampleTest.java <<'JAVA'
+import static org.junit.jupiter.api.Assertions.*;
+import org.junit.jupiter.api.Test;
+
+class SampleTest {
+    @Test void demo() { assertTrue(true); }
+}
+JAVA
+  echo "[✓] Added SampleTest.java"
 fi
 
-echo "[✓] Source folders up‑to‑date."
-echo
-
-# ---------- 4. run tests + coverage ----------
+# ---------- 6. run first build + coverage -------------------------
 ./mvnw -q clean test
-echo "[✓] Tests completed"
-echo
-
-REPORT="$HARNESS_DIR/target/site/jacoco/index.html"
-
-# ---------- 5. open report ----------
-if command -v xdg-open >/dev/null 2>&1; then
-  xdg-open "$REPORT" >/dev/null 2>&1 &
-elif command -v open >/dev/null 2>&1; then
-  open "$REPORT" >/dev/null 2>&1 &
-elif command -v start >/dev/null 2>&1; then
-  start "" "$REPORT"
-else
-  echo "Coverage report: $REPORT"
-fi
-echo "📊  Coverage report opened."
+echo "[✓] Harness ready (coverage report generated)"
+echo "   open $(pwd)/target/site/jacoco/index.html"
